@@ -17,6 +17,8 @@ from .llm import LLM, LiteLLM
 from .config import Config
 from .session import save_session, load_session, list_sessions
 from . import __version__
+from .prompt import executor_prompt, planner_prompt
+from .tools import ALL_TOOLS
 
 console = Console()
 
@@ -135,7 +137,7 @@ def _repl(agent: Agent, config: Config):
 
     hist_path = os.path.expanduser("~/.corecoder_history")
     history = FileHistory(hist_path)
-    auto_accept = False
+    mode = "default"
 
     # Enter submits, Escape+Enter inserts a newline (for pasting code blocks etc.)
     kb = KeyBindings()
@@ -151,7 +153,7 @@ def _repl(agent: Agent, config: Config):
     while True:
         try:
             user_input = pt_prompt(
-                "You > ",
+                f"[{mode}] > ",
                 history=history,
                 multiline=True,
                 key_bindings=kb,
@@ -171,9 +173,14 @@ def _repl(agent: Agent, config: Config):
             _show_help()
             continue
         if user_input in ("/auto", "/mode"):
-            auto_accept = not auto_accept
-            mode = "auto accept" if auto_accept else "普通（需确认）"
-            console.print(f"[green]Mode: {mode}[/green]")
+            mode = "default" if mode == "auto" else "auto"
+            label = "auto accept" if mode == "auto" else "default (confirmation needed)"
+            console.print(f"[green]Mode: {label}[/green]")
+            continue
+        if user_input == "/plan":
+            mode = "default" if mode == "plan" else "plan"
+            label = "plan (confirmation required)" if mode == "plan" else "default (confirmation needed)"
+            console.print(f"[green]Mode: {label}[/green]")
             continue
         if user_input == "/reset":
             agent.reset()
@@ -235,7 +242,47 @@ def _repl(agent: Agent, config: Config):
             console.print(f"[yellow]Unknown command: {user_input.split()[0]} (try /help)[/yellow]")
             continue
 
-        # call the agent
+        # In plan mode, first use a separate read-only planner.  The executor
+        # is only created after the user approves the resulting plan.
+        if mode == "plan":
+            planner_tools = [
+                tool for tool in ALL_TOOLS
+                if tool.name in {"read_file", "glob", "grep", "now", "fetch_url"}
+            ]
+            planner = Agent(
+                llm=agent.llm,
+                tools=planner_tools,
+                max_context_tokens=agent.context.max_tokens,
+                prompt_builder=planner_prompt,
+            )
+            try:
+                plan = planner.chat(user_input)
+                while True:
+                    console.print(Panel(Markdown(plan), title="Proposed plan", border_style="yellow"))
+                    if Confirm.ask("Comfirm the plan and start execution?", default=True):
+                        agent = Agent(
+                            llm=agent.llm,
+                            max_context_tokens=agent.context.max_tokens,
+                            prompt_builder=executor_prompt,
+                        )
+                        user_input = (
+                            f"Original task:\n{user_input}\n\n"
+                            f"User-approved plan:\n{plan}"
+                        )
+                        break
+                    feedback = pt_prompt("Suggestions (or Enter to re-plan): ").strip()
+                    plan = planner.chat(
+                        "The plan needs to be revised. The feedback is as follows:\n"
+                        + (feedback or "Please recheck the task and codebase, and provide a more complete and executable plan.")
+                    )
+            except KeyboardInterrupt:
+                console.print("\n[yellow]Interrupted.[/yellow]")
+                continue
+            except Exception as e:
+                console.print(f"\n[red]Error: {e}[/red]")
+                continue
+
+        # call the (normal or newly-created executor) agent
         streamed: list[str] = []
 
         def on_token(tok):
@@ -251,7 +298,7 @@ def _repl(agent: Agent, config: Config):
         try:
             response = agent.chat(
                 user_input, on_token=on_token, on_tool=on_tool,
-                approve_tool=approve_tool, auto_accept=auto_accept,
+                approve_tool=approve_tool, auto_accept=(mode in {"auto", "plan"}),
             )
             if streamed:
                 print()  # newline after streamed tokens
@@ -268,6 +315,7 @@ def _show_help():
     console.print(Panel(
         "[bold]Commands:[/bold]\n"
         "  /auto          Toggle auto accept / confirmation mode\n"
+        "  /plan          Plan first, then approve before execution\n"
         "  /help          Show this help\n"
         "  /reset         Clear conversation history\n"
         "  /model         Show current model\n"
