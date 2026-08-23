@@ -1,13 +1,14 @@
 """Tests for the tool system."""
 
 import os
+import re
 import sys
 
 from corecoder.tools import ALL_TOOLS, get_tool
 
 
 def test_tool_count():
-    assert len(ALL_TOOLS) == 7
+    assert len(ALL_TOOLS) == 9
 
 
 def test_all_tools_have_valid_schema():
@@ -302,3 +303,12 @@ def test_agent_tool_schema():
     s = agent_t.schema()
     assert s["function"]["name"] == "agent"
     assert "task" in s["function"]["parameters"]["properties"]
+
+
+# --- now tool ---
+
+def test_now_tool_schema():
+    now_t = get_tool("now")
+    res = now_t.execute()
+    assert re.match(r"\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}:\d{2}", res)
+
