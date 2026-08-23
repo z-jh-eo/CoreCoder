@@ -12,3 +12,19 @@
 ## TODO
 
 ...
+
+## Quick start
+
+### Install
+
+```
+git clone https://github.com/z-jh-eo/CoreCoder.git
+cd CoreCoder
+pip install -e .
+```
+
+### Run
+
+```
+corecoder
+```
