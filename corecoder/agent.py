@@ -20,6 +20,8 @@ from .context import ContextManager
 
 
 class Agent:
+    APPROVAL_REQUIRED = frozenset({"bash", "write_file", "edit_file"})
+
     def __init__(
         self,
         llm: LLM,
@@ -46,7 +48,8 @@ class Agent:
     def _tool_schemas(self) -> list[dict]:
         return [t.schema() for t in self.tools]
 
-    def chat(self, user_input: str, on_token=None, on_tool=None) -> str:
+    def chat(self, user_input: str, on_token=None, on_tool=None,
+             approve_tool=None, auto_accept: bool = False) -> str:
         """Process one user message. May involve multiple LLM/tool rounds."""
         self.messages.append({"role": "user", "content": user_input})
         self.context.maybe_compress(self.messages, self.llm)
@@ -72,7 +75,8 @@ class Agent:
                     tc = resp.tool_calls[0]
                     if on_tool:
                         on_tool(tc.name, tc.arguments)
-                    result = self._exec_tool(tc)
+                    approved = self._approve_tool(tc, approve_tool, auto_accept)
+                    result = self._exec_tool(tc) if approved else "[denied by user]"
                     self.messages.append({
                         "role": "tool",
                         "tool_call_id": tc.id,
@@ -80,7 +84,9 @@ class Agent:
                     })
                 else:
                     # parallel execution for multiple tool calls
-                    results = self._exec_tools_parallel(resp.tool_calls, on_tool)
+                    results = self._exec_tools_parallel(
+                        resp.tool_calls, on_tool, approve_tool, auto_accept
+                    )
                     for tc, result in zip(resp.tool_calls, results):
                         self.messages.append({
                             "role": "tool",
@@ -114,20 +120,30 @@ class Agent:
         except Exception as e:
             return f"Error executing {tc.name}: {e}"
 
-    def _exec_tools_parallel(self, tool_calls, on_tool=None) -> list[str]:
+    def _approve_tool(self, tc, approve_tool, auto_accept: bool) -> bool:
+        if tc.name not in self.APPROVAL_REQUIRED or auto_accept:
+            return True
+        return bool(approve_tool and approve_tool(tc.name, tc.arguments))
+
+    def _exec_tools_parallel(self, tool_calls, on_tool=None, approve_tool=None,
+                             auto_accept: bool = False) -> list[str]:
         """Run multiple tool calls concurrently using threads.
 
         This is inspired by Claude Code's StreamingToolExecutor which starts
         executing tools while the model is still generating.  We simplify to:
         when the model returns N tool calls at once, run them in parallel.
         """
+        approved = []
         for tc in tool_calls:
             if on_tool:
                 on_tool(tc.name, tc.arguments)
+            if self._approve_tool(tc, approve_tool, auto_accept):
+                approved.append(tc)
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
-            futures = [pool.submit(self._exec_tool, tc) for tc in tool_calls]
-            return [f.result() for f in futures]
+            futures = {tc.id: pool.submit(self._exec_tool, tc) for tc in approved}
+            return [futures[tc.id].result() if tc.id in futures else "[denied by user]"
+                    for tc in tool_calls]
 
     def _answer_pending_tool_calls(self, tool_calls):
         """Backfill a tool reply for every call that didn't get one.

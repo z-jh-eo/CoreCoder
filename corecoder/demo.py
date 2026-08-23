@@ -78,6 +78,7 @@ def run_demo() -> int:
     result = agent.chat(
         _TASK,
         on_tool=lambda name, args: console.print(f"[cyan]tool:[/] {name} {_summarize(args)}"),
+        auto_accept=True,
     )
     console.print(Panel.fit(Markdown(result), title="final"))
     console.print(f"[dim]workspace kept at {workdir}[/]")

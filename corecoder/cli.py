@@ -7,6 +7,7 @@ import argparse
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
+from rich.prompt import Confirm
 from prompt_toolkit import prompt as pt_prompt
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
@@ -110,7 +111,9 @@ def _run_once(agent: Agent, prompt: str):
         console.print(f"\n[dim]> {name}({_brief(kwargs)})[/dim]")
 
     try:
-        agent.chat(prompt, on_token=on_token, on_tool=on_tool)
+        # One-shot mode has no interactive approval prompt, so preserve its
+        # historical non-interactive behavior by accepting tool calls.
+        agent.chat(prompt, on_token=on_token, on_tool=on_tool, auto_accept=True)
     except KeyboardInterrupt:
         console.print("\n[yellow]Interrupted.[/yellow]")
         sys.exit(130)
@@ -132,6 +135,7 @@ def _repl(agent: Agent, config: Config):
 
     hist_path = os.path.expanduser("~/.corecoder_history")
     history = FileHistory(hist_path)
+    auto_accept = False
 
     # Enter submits, Escape+Enter inserts a newline (for pasting code blocks etc.)
     kb = KeyBindings()
@@ -165,6 +169,11 @@ def _repl(agent: Agent, config: Config):
             break
         if user_input == "/help":
             _show_help()
+            continue
+        if user_input in ("/auto", "/mode"):
+            auto_accept = not auto_accept
+            mode = "auto accept" if auto_accept else "普通（需确认）"
+            console.print(f"[green]Mode: {mode}[/green]")
             continue
         if user_input == "/reset":
             agent.reset()
@@ -236,8 +245,14 @@ def _repl(agent: Agent, config: Config):
         def on_tool(name, kwargs):
             console.print(f"\n[dim]> {name}({_brief(kwargs)})[/dim]")
 
+        def approve_tool(name, kwargs):
+            return Confirm.ask(f"执行 {name}({_brief(kwargs, 240)})?", default=False)
+
         try:
-            response = agent.chat(user_input, on_token=on_token, on_tool=on_tool)
+            response = agent.chat(
+                user_input, on_token=on_token, on_tool=on_tool,
+                approve_tool=approve_tool, auto_accept=auto_accept,
+            )
             if streamed:
                 print()  # newline after streamed tokens
             else:
@@ -252,6 +267,7 @@ def _repl(agent: Agent, config: Config):
 def _show_help():
     console.print(Panel(
         "[bold]Commands:[/bold]\n"
+        "  /auto          Toggle auto accept / confirmation mode\n"
         "  /help          Show this help\n"
         "  /reset         Clear conversation history\n"
         "  /model         Show current model\n"
